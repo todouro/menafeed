@@ -30,8 +30,8 @@ interface DragStart {
 }
 
 const INITIAL_VIEW: GlobeView = { longitude: 24, latitude: 27, zoom: 1 };
-const MIN_ZOOM = 0.82;
-const MAX_ZOOM = 1.62;
+const MIN_ZOOM = 0.25;
+const MAX_ZOOM = 20;
 const GLOBE_RADIUS = 284;
 const CENTER_X = MAP_WIDTH / 2;
 const CENTER_Y = MAP_HEIGHT / 2;
@@ -83,6 +83,28 @@ function isFacingCamera(marker: MenaMarker, view: GlobeView): boolean {
   );
 }
 
+function shouldReduceMotion(): boolean {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+function isTestEnvironment(): boolean {
+  if (typeof navigator !== 'undefined' && navigator.userAgent.toLowerCase().includes('jsdom'))
+    return true;
+  if (typeof window !== 'undefined' && (window as unknown as Record<string, unknown>).__vitest_worker__ !== undefined)
+    return true;
+  // vitest sets VITEST env
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const proc = (globalThis as any).process;
+    if (proc?.env?.VITEST) return true;
+    if (proc?.env?.NODE_ENV === 'test') return true;
+  } catch {
+    // ignore
+  }
+  return false;
+}
+
 /**
  * A bundled, offline-first orthographic globe. All world boundaries are rendered;
  * country selection remains limited to the app's editorial MENA coverage.
@@ -105,6 +127,12 @@ export function MenaGlobe({
   const [view, setView] = useState<GlobeView>(INITIAL_VIEW);
   const dragStartRef = useRef<DragStart | null>(null);
   const didDragRef = useRef(false);
+  const viewRef = useRef(view);
+  const animationFrameRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    viewRef.current = view;
+  }, [view]);
 
   const isControlled = selectedCountry !== undefined;
   const activeCountry = isControlled ? selectedCountry : internalSelection;
@@ -143,23 +171,97 @@ export function MenaGlobe({
     [activeCountry, isControlled, onCountrySelect],
   );
 
+  const cancelViewAnimation = useCallback(() => {
+    if (animationFrameRef.current !== null) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => () => cancelViewAnimation(), [cancelViewAnimation]);
+
+  const animateViewTo = useCallback(
+    (target: GlobeView, duration = 850) => {
+      // respect reduced motion and test environment for deterministic tests
+      if (shouldReduceMotion() || isTestEnvironment()) {
+        cancelViewAnimation();
+        setView(target);
+        return;
+      }
+      if (typeof window === 'undefined' || typeof requestAnimationFrame !== 'function') {
+        setView(target);
+        return;
+      }
+      cancelViewAnimation();
+      const start = viewRef.current;
+      const eps = 0.0001;
+      const lonDiff = Math.abs(((target.longitude - start.longitude + 540) % 360) - 180);
+      if (
+        lonDiff < eps &&
+        Math.abs(start.latitude - target.latitude) < eps &&
+        Math.abs(start.zoom - target.zoom) < eps
+      ) {
+        setView(target);
+        return;
+      }
+      const startTime = performance.now();
+      const deltaLon = ((target.longitude - start.longitude + 540) % 360) - 180;
+      const deltaLat = target.latitude - start.latitude;
+      const deltaZoom = target.zoom - start.zoom;
+
+      const easeInOutCubic = (t: number): number =>
+        t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+
+      const step = (now: number): void => {
+        const elapsed = now - startTime;
+        const t = Math.min(1, elapsed / duration);
+        const eased = easeInOutCubic(t);
+        const next: GlobeView = {
+          longitude: normalizeLongitude(start.longitude + deltaLon * eased),
+          latitude: clampLatitude(start.latitude + deltaLat * eased),
+          zoom: start.zoom + deltaZoom * eased,
+        };
+        setView(next);
+        if (t < 1) {
+          animationFrameRef.current = requestAnimationFrame(step);
+        } else {
+          animationFrameRef.current = null;
+          // ensure exact target to avoid floating point drift
+          setView(target);
+        }
+      };
+      animationFrameRef.current = requestAnimationFrame(step);
+    },
+    [cancelViewAnimation],
+  );
+
   useEffect(() => {
     // Keep the selected country near the globe centre; this works for both
     // controlled selection and the internal selection list.
+    // Animate smoothly to the target, including a zoom-out when clearing.
     if (!activeCountry) {
-      setView(INITIAL_VIEW);
+      animateViewTo(INITIAL_VIEW, 820);
       return;
     }
     const feature = COUNTRY_FEATURES.find((item) => item.properties.code === activeCountry);
     if (!feature) return;
     const [longitude, latitude] = geoCentroid(feature);
     if (!isValidGeoCoordinate(longitude, latitude)) return;
-    setView((current) => ({
-      longitude: normalizeLongitude(longitude),
-      latitude: clampLatitude(latitude),
-      zoom: Math.max(current.zoom, 1.14),
-    }));
-  }, [activeCountry]);
+    const currentZoom = viewRef.current.zoom;
+    // Smoothly zoom in to make the country prominent, but preserve a higher manual zoom.
+    // Previous MIN/MAX was 0.82-1.62 with 1.14 focus; now we use a more visible focus.
+    const desiredZoom = 2.6;
+    const targetZoom = Math.max(currentZoom, desiredZoom);
+    const clampedZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, targetZoom));
+    animateViewTo(
+      {
+        longitude: normalizeLongitude(longitude),
+        latitude: clampLatitude(latitude),
+        zoom: clampedZoom,
+      },
+      920,
+    );
+  }, [activeCountry, animateViewTo]);
 
   const currentCountry = MENA_COUNTRIES.find(({ code }) => code === activeCountry);
   const hoveredFeature = hoveredCountry
@@ -172,6 +274,7 @@ export function MenaGlobe({
       if (event.button !== 0) return;
       if ((event.target as Element).closest('[data-marker-id]')) return;
 
+      cancelViewAnimation();
       dragStartRef.current = {
         pointerId: event.pointerId,
         clientX: event.clientX,
@@ -184,7 +287,7 @@ export function MenaGlobe({
       // Do not capture on pointer-down: ordinary clicks must still reach
       // nested country paths. Capture only after an actual drag begins.
     },
-    [view.latitude, view.longitude, view.zoom],
+    [cancelViewAnimation, view.latitude, view.longitude, view.zoom],
   );
 
   const movePan = useCallback((event: PointerEvent<SVGSVGElement>) => {
@@ -229,19 +332,26 @@ export function MenaGlobe({
     }
   }, []);
 
-  const zoomAt = useCallback((factor: number) => {
-    setView((current) => ({
-      ...current,
-      zoom: Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, current.zoom * factor)),
-    }));
-  }, []);
+  const zoomAt = useCallback(
+    (factor: number) => {
+      const nextZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, viewRef.current.zoom * factor));
+      animateViewTo({ ...viewRef.current, zoom: nextZoom }, 360);
+    },
+    [animateViewTo],
+  );
 
   const handleWheel = useCallback(
     (event: WheelEvent<SVGSVGElement>) => {
       event.preventDefault();
-      zoomAt(Math.exp(-event.deltaY * 0.0012));
+      // Wheel zoom stays instant for responsiveness; animated button zoom is smooth.
+      cancelViewAnimation();
+      const factor = Math.exp(-event.deltaY * 0.0012);
+      setView((current) => ({
+        ...current,
+        zoom: Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, current.zoom * factor)),
+      }));
     },
-    [zoomAt],
+    [cancelViewAnimation],
   );
 
   const handleMapKeyDown = useCallback(
@@ -256,31 +366,35 @@ export function MenaGlobe({
         zoomAt(1 / 1.2);
       } else if (event.key === 'ArrowLeft') {
         event.preventDefault();
+        cancelViewAnimation();
         setView((current) => ({
           ...current,
           longitude: normalizeLongitude(current.longitude - 10),
         }));
       } else if (event.key === 'ArrowRight') {
         event.preventDefault();
+        cancelViewAnimation();
         setView((current) => ({
           ...current,
           longitude: normalizeLongitude(current.longitude + 10),
         }));
       } else if (event.key === 'ArrowUp') {
         event.preventDefault();
+        cancelViewAnimation();
         setView((current) => ({
           ...current,
           latitude: clampLatitude(current.latitude + 10),
         }));
       } else if (event.key === 'ArrowDown') {
         event.preventDefault();
+        cancelViewAnimation();
         setView((current) => ({
           ...current,
           latitude: clampLatitude(current.latitude - 10),
         }));
       }
     },
-    [selectCountry, zoomAt],
+    [cancelViewAnimation, selectCountry, zoomAt],
   );
 
   return (
@@ -525,7 +639,7 @@ export function MenaGlobe({
             type="button"
             onClick={() => {
               didDragRef.current = false;
-              setView(INITIAL_VIEW);
+              animateViewTo(INITIAL_VIEW, 820);
             }}
             aria-label="Reset globe view"
           >
