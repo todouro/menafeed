@@ -55,12 +55,14 @@ describe('MenaGlobe', () => {
     expect(morocco).toHaveAttribute('aria-pressed', 'true');
 
     // Complete the currently scheduled frame, then its final frame.
-    const first = [...frames.entries()][0];
-    expect(first).toBeDefined();
-    act(() => first[1](1000));
-    const finalFrame = [...frames.entries()][0];
-    expect(finalFrame).toBeDefined();
-    act(() => finalFrame[1](1540));
+    const runNextFrame = (time: number) => {
+      const next = [...frames.entries()][0];
+      expect(next).toBeDefined();
+      frames.delete(next![0]);
+      act(() => next![1](time));
+    };
+    runNextFrame(1000);
+    runNextFrame(1540);
 
     expect(egypt.getAttribute('d')).not.toBe(initialPath);
     expect(morocco.getAttribute('d')).not.toBeNull();
