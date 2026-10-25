@@ -307,31 +307,35 @@ export function MenaGlobe({
         zoomAt(1 / 1.2);
       } else if (event.key === 'ArrowLeft') {
         event.preventDefault();
+        cancelViewAnimation();
         setView((current) => ({
           ...current,
           longitude: normalizeLongitude(current.longitude - 10),
         }));
       } else if (event.key === 'ArrowRight') {
         event.preventDefault();
+        cancelViewAnimation();
         setView((current) => ({
           ...current,
           longitude: normalizeLongitude(current.longitude + 10),
         }));
       } else if (event.key === 'ArrowUp') {
         event.preventDefault();
+        cancelViewAnimation();
         setView((current) => ({
           ...current,
           latitude: clampLatitude(current.latitude + 10),
         }));
       } else if (event.key === 'ArrowDown') {
         event.preventDefault();
+        cancelViewAnimation();
         setView((current) => ({
           ...current,
           latitude: clampLatitude(current.latitude - 10),
         }));
       }
     },
-    [selectCountry, zoomAt],
+    [cancelViewAnimation, selectCountry, zoomAt],
   );
 
   return (
