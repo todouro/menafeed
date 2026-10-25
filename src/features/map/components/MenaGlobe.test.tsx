@@ -1,6 +1,6 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { useState } from 'react';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { MenaGlobe } from './MenaGlobe';
 import type { MenaCountryCode, MenaMarker } from '../types';
 
@@ -10,6 +10,61 @@ function ControlledMap() {
 }
 
 describe('MenaGlobe', () => {
+  beforeEach(() => {
+    // Keep legacy interaction assertions deterministic; dedicated tests below
+    // exercise the real requestAnimationFrame transition path.
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query.includes('prefers-reduced-motion'),
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('animates projection geometry and replaces a transition on rapid country changes', () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 1;
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: false,
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }));
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      const id = nextFrame++;
+      frames.set(id, callback);
+      return id;
+    });
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => {
+      frames.delete(id);
+    });
+
+    render(<MenaGlobe />);
+    const egypt = screen.getByRole('button', { name: 'Select Egypt' });
+    const morocco = screen.getByRole('button', { name: 'Select Morocco' });
+    const initialPath = egypt.getAttribute('d');
+
+    fireEvent.click(egypt);
+    expect(egypt.getAttribute('d')).toBe(initialPath);
+    fireEvent.click(morocco);
+    expect(egypt).toHaveAttribute('aria-pressed', 'false');
+    expect(morocco).toHaveAttribute('aria-pressed', 'true');
+
+    // Complete the currently scheduled frame, then its final frame.
+    const first = [...frames.entries()][0];
+    expect(first).toBeDefined();
+    act(() => first[1](1000));
+    const finalFrame = [...frames.entries()][0];
+    expect(finalFrame).toBeDefined();
+    act(() => finalFrame[1](1540));
+
+    expect(egypt.getAttribute('d')).not.toBe(initialPath);
+    expect(morocco.getAttribute('d')).not.toBeNull();
+  });
   it('selects a country through its geographic shape and reports it to the parent', () => {
     const onCountrySelect = vi.fn();
     render(<MenaGlobe onCountrySelect={onCountrySelect} />);
